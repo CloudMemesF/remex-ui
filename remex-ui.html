@@ -159,7 +159,7 @@ function forceWin() {
 function loadWebhook() {
   var u = document.getElementById("wht").value.trim();
   if (!u) { log("Manglende webhook UUID", 0); return; }
-  fetch("https://webhook.site/token/" + u + "/requests?page=1&per_page=20")
+ fetch("https://api.allorigins.win/raw?url=" + encodeURIComponent("https://webhook.site/token/" + u + "/requests?page=1&per_page=20"))
     .then(function (r) { return r.json(); })
     .then(function (d) {
       var el = document.getElementById("log");
